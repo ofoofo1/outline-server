@@ -31,7 +31,6 @@ export function loadFileConfig<T>(filename: string): JsonConfig<T> {
   return new FileConfig<T>(filename, dataJson);
 }
 
-
 // FileConfig is a JsonConfig backed by a filesystem file.
 export class FileConfig<T> implements JsonConfig<T> {
   constructor(private filename: string, private dataJson: T) {}
@@ -90,7 +89,7 @@ export class DelayedConfig<T> implements JsonConfig<T> {
 // InMemoryConfig is a JsonConfig backed by an internal member variable. Useful for testing.
 export class InMemoryConfig<T> implements JsonConfig<T> {
   // Holds the data JSON as it was when `write()` was called.
-  public mostRecentWrite: T;
+  mostRecentWrite: T;
   constructor(private dataJson: T) {
     this.mostRecentWrite = this.dataJson;
   }

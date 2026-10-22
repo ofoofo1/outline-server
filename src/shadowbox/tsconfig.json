@@ -7,15 +7,9 @@
     "module": "commonjs",
     "rootDir": ".",
     "resolveJsonModule": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "skipLibCheck": true
   },
-  "include": [
-    "server/main.ts",
-    "**/*.spec.ts",
-    "types/**/*.d.ts"
-  ],
-  "exclude": [
-    "build",
-    "node_modules"
-  ]
+  "include": ["server/main.ts", "**/*.spec.ts", "types/**/*.d.ts"],
+  "exclude": ["build", "node_modules"]
 }

@@ -14,15 +14,22 @@
 
 import {Table} from '@google-cloud/bigquery';
 import {InsertableTable} from './infrastructure/table';
-import {HourlyConnectionMetricsReport, HourlyUserConnectionMetricsReport} from './model';
+import {
+  HourlyConnectionMetricsReport,
+  HourlyUserConnectionMetricsReport,
+  HourlyUserConnectionMetricsReportByLocation,
+} from './model';
+
+const TERABYTE = Math.pow(2, 40);
 
 export interface ConnectionRow {
   serverId: string;
-  startTimestamp: string;  // ISO formatted string.
-  endTimestamp: string;    // ISO formatted string.
-  userId: string;
+  startTimestamp: string; // ISO formatted string.
+  endTimestamp: string; // ISO formatted string.
   bytesTransferred: number;
-  countries: string[];
+  tunnelTimeSec?: number;
+  countries?: string[];
+  asn?: number;
 }
 
 export class BigQueryConnectionsTable implements InsertableTable<ConnectionRow> {
@@ -34,7 +41,9 @@ export class BigQueryConnectionsTable implements InsertableTable<ConnectionRow> 
 }
 
 export function postConnectionMetrics(
-    table: InsertableTable<ConnectionRow>, report: HourlyConnectionMetricsReport) {
+  table: InsertableTable<ConnectionRow>,
+  report: HourlyConnectionMetricsReport
+): Promise<void> {
   return table.insert(getConnectionRowsFromReport(report));
 }
 
@@ -43,77 +52,111 @@ function getConnectionRowsFromReport(report: HourlyConnectionMetricsReport): Con
   const endTimestampStr = new Date(report.endUtcMs).toISOString();
   const rows = [];
   for (const userReport of report.userReports) {
-    rows.push({
-      serverId: report.serverId,
-      startTimestamp: startTimestampStr,
-      endTimestamp: endTimestampStr,
-      userId: userReport.userId,
-      bytesTransferred: userReport.bytesTransferred,
-      countries: userReport.countries
-    });
+    // User reports come in 2 flavors: "per location" and "per key". We no longer store the
+    // "per key" reports.
+    if (isPerLocationUserReport(userReport)) {
+      rows.push({
+        serverId: report.serverId,
+        startTimestamp: startTimestampStr,
+        endTimestamp: endTimestampStr,
+        bytesTransferred: userReport.bytesTransferred,
+        tunnelTimeSec: userReport.tunnelTimeSec || undefined,
+        countries: userReport.countries,
+        asn: userReport.asn || undefined,
+      });
+    }
   }
   return rows;
 }
 
+function isPerLocationUserReport(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  userReport: HourlyUserConnectionMetricsReport
+): userReport is HourlyUserConnectionMetricsReportByLocation {
+  return 'countries' in userReport;
+}
+
 // Returns true iff testObject contains a valid HourlyConnectionMetricsReport.
-// tslint:disable-next-line:no-any
-export function isValidConnectionMetricsReport(testObject: any):
-    testObject is HourlyConnectionMetricsReport {
+export function isValidConnectionMetricsReport(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  testObject: any
+): testObject is HourlyConnectionMetricsReport {
   if (!testObject) {
+    console.debug('Missing test object');
     return false;
   }
 
-  // Check that all required fields are present.
   const requiredConnectionMetricsFields = ['serverId', 'startUtcMs', 'endUtcMs', 'userReports'];
   for (const fieldName of requiredConnectionMetricsFields) {
     if (!testObject[fieldName]) {
+      console.debug(`Missing required field \`${fieldName}\``);
       return false;
     }
   }
 
-  // Check that `serverId` is a string.
   if (typeof testObject.serverId !== 'string') {
+    console.debug('Invalid `serverId`');
     return false;
   }
 
-  // Check timestamp types and that startUtcMs is not after endUtcMs.
-  if (typeof testObject.startUtcMs !== 'number' || typeof testObject.endUtcMs !== 'number' ||
-      testObject.startUtcMs >= testObject.endUtcMs) {
+  if (
+    typeof testObject.startUtcMs !== 'number' ||
+    typeof testObject.endUtcMs !== 'number' ||
+    testObject.startUtcMs >= testObject.endUtcMs
+  ) {
+    console.debug('Invalid `startUtcMs` and/or `endUtcMs`');
     return false;
   }
 
-  // Check that userReports is an array of 1 or more item.
-  if (!(testObject.userReports.length >= 1)) {
+  if (testObject.userReports.length === 0) {
+    console.debug('At least 1 user report must be provided');
     return false;
   }
 
-  const requiredUserReportFields = ['userId', 'countries', 'bytesTransferred'];
-  const MIN_BYTES_TRANSFERRED = 0;
-  const MAX_BYTES_TRANSFERRED = 1 * Math.pow(2, 40);  // 1 TB.
   for (const userReport of testObject.userReports) {
-    // Test that each `userReport` contains the required fields.
-    for (const fieldName of requiredUserReportFields) {
-      if (!userReport[fieldName]) {
-        return false;
-      }
-    }
-    // Check that `userId` is a string.
-    if (typeof userReport.userId !== 'string') {
+    if (userReport.userId && typeof userReport.userId !== 'string') {
+      console.debug('Invalid `serverId`');
       return false;
     }
 
-    // Check that `bytesTransferred` is a number between min and max transfer limits
-    if (typeof userReport.bytesTransferred !== 'number' ||
-        userReport.bytesTransferred < MIN_BYTES_TRANSFERRED ||
-        userReport.bytesTransferred > MAX_BYTES_TRANSFERRED) {
+    // We used to set a limit of 1TB per access key, then per location. We later
+    // realized that a server may use a single key, or all the traffic may come
+    // from a single location.
+    // However, as we report hourly, it's unlikely we hit 1TB, so we keep the
+    // check for now to try and prevent malicious reports.
+    if (
+      typeof userReport.bytesTransferred !== 'number' ||
+      userReport.bytesTransferred < 0 ||
+      userReport.bytesTransferred > TERABYTE
+    ) {
+      console.debug('Invalid `bytesTransferred`');
       return false;
     }
 
-    // Check that `countries` are strings.
-    for (const country of userReport.countries) {
-      if (typeof country !== 'string') {
+    if (
+      userReport.tunnelTimeSec &&
+      (typeof userReport.tunnelTimeSec !== 'number' || userReport.tunnelTimeSec < 0)
+    ) {
+      console.debug('Invalid `tunnelTimeSec`');
+      return false;
+    }
+
+    if (userReport.countries) {
+      if (!Array.isArray(userReport.countries)) {
+        console.debug('Invalid `countries`');
         return false;
       }
+      for (const country of userReport.countries) {
+        if (typeof country !== 'string') {
+          console.debug('Invalid `countries`');
+          return false;
+        }
+      }
+    }
+
+    if (userReport.asn && typeof userReport.asn !== 'number') {
+      console.debug('Invalid `asn`');
+      return false;
     }
   }
 

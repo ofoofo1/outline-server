@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as http from 'http';
@@ -22,63 +21,148 @@ import * as path from 'path';
 
 import * as logging from '../infrastructure/logging';
 
+/**
+ * Represents a Unix timestamp in seconds.
+ * @typedef {number} Timestamp
+ */
+type Timestamp = number;
+
+/**
+ * Represents a Prometheus metric's labels.
+ * Each key in the object is a label name, and the corresponding value is the label's value.
+ *
+ * @typedef {Object<string, string>} PrometheusMetric
+ */
+export type PrometheusMetric = {[labelValue: string]: string};
+
+/**
+ * Represents a Prometheus value, which is a tuple of a timestamp and a string value.
+ * @typedef {[Timestamp, string]} PrometheusValue
+ */
+export type PrometheusValue = [Timestamp, string];
+
+/**
+ * Represents a Prometheus result, which can be a time series (values) or a single value.
+ * @typedef {Object} PrometheusResult
+ * @property {Object.<string, string>} metric - Labels associated with the metric.
+ * @property {Array<PrometheusValue>} [values] - Time series data (for range queries).
+ * @property {PrometheusValue} [value] - Single value (for instant queries).
+ */
+export type PrometheusResult = {
+  metric: PrometheusMetric;
+  values?: PrometheusValue[];
+  value?: PrometheusValue;
+};
+
+/**
+ * Represents the data part of a Prometheus query result.
+ * @interface QueryResultData
+ */
 export interface QueryResultData {
-  resultType: 'matrix'|'vector'|'scalar'|'string';
-  result: Array < {
-    metric: {[labelValue: string]: string};
-    value: [number, string];
-  }
-  > ;
+  resultType: 'matrix' | 'vector' | 'scalar' | 'string';
+  result: PrometheusResult[];
 }
 
-// From https://prometheus.io/docs/prometheus/latest/querying/api/
+/**
+ * Represents the full JSON response from a Prometheus query.  This interface
+ * is based on the Prometheus API documentation:
+ * https://prometheus.io/docs/prometheus/latest/querying/api/
+ * @interface QueryResult
+ */
 interface QueryResult {
-  status: 'success'|'error';
+  status: 'success' | 'error';
   data: QueryResultData;
   errorType: string;
   error: string;
 }
 
-export class PrometheusClient {
-  constructor(private address: string) {}
+/**
+ * Interface for a Prometheus client.
+ * @interface PrometheusClient
+ */
+export interface PrometheusClient {
+  /**
+   * Performs an instant query against the Prometheus API.
+   * @function query
+   * @param {string} query - The PromQL query string.
+   * @returns {Promise<QueryResultData>} A Promise that resolves to the query result data.
+   */
+  query(query: string): Promise<QueryResultData>;
+
+  /**
+   * Performs a range query against the Prometheus API.
+   * @function queryRange
+   * @param {string} query - The PromQL query string.
+   * @param {number} start - The start time for the query range.
+   * @param {number} end - The end time for the query range.
+   * @param {string} step - The step size for the query range (e.g., "1m", "5m").  This controls the resolution of the returned data.
+   * @returns {Promise<QueryResultData>} A Promise that resolves to the query result data.
+   */
+  queryRange(query: string, start: number, end: number, step: string): Promise<QueryResultData>;
+}
+
+export class ApiPrometheusClient implements PrometheusClient {
+  private readonly agent: http.Agent;
+
+  constructor(private address: string) {
+    this.agent = new http.Agent({ keepAlive: true });
+  }
+
+  private request(url: string): Promise<QueryResultData> {
+    return new Promise<QueryResultData>((fulfill, reject) => {
+      const options = {agent: this.agent};
+      http
+        .get(url, options, (response) => {
+          if (response.statusCode < 200 || response.statusCode > 299) {
+            reject(new Error(`Got error ${response.statusCode}`));
+            response.resume();
+            return;
+          }
+          let body = '';
+          response.on('data', (data) => {
+            body += data;
+          });
+          response.on('end', () => {
+            const result = JSON.parse(body) as QueryResult;
+            if (result.status !== 'success') {
+              return reject(new Error(`Error ${result.errorType}: ${result.error}`));
+            }
+            fulfill(result.data);
+          });
+        })
+        .on('error', (e) => {
+          reject(new Error(`Failed to query prometheus API: ${e}`));
+        });
+    });
+  }
 
   query(query: string): Promise<QueryResultData> {
-    return new Promise<QueryResultData>((fulfill, reject) => {
-      const url = `${this.address}/api/v1/query?query=${encodeURIComponent(query)}`;
-      http.get(url, (response) => {
-            if (response.statusCode < 200 || response.statusCode > 299) {
-              reject(new Error(`Got error ${response.statusCode}`));
-              response.resume();
-              return;
-            }
-            let body = '';
-            response.on('data', (data) => {
-              body += data;
-            });
-            response.on('end', () => {
-              const result = JSON.parse(body) as QueryResult;
-              if (result.status !== 'success') {
-                return reject(new Error(`Error ${result.errorType}: ${result.error}`));
-              }
-              fulfill(result.data);
-            });
-          }).on('error', (e) => {
-        reject(new Error(`Failed to query prometheus API: ${e}`));
-      });
-    });
+    const url = `${this.address}/api/v1/query?query=${encodeURIComponent(query)}`;
+    return this.request(url);
+  }
+
+  queryRange(query: string, start: number, end: number, step: string): Promise<QueryResultData> {
+    const url = `${this.address}/api/v1/query_range?query=${encodeURIComponent(
+      query
+    )}&start=${start}&end=${end}&step=${step}`;
+    return this.request(url);
   }
 }
 
 export async function startPrometheus(
-    binaryFilename: string, configFilename: string, configJson: {}, processArgs: string[],
-    endpoint: string) {
+  binaryFilename: string,
+  configFilename: string,
+  configJson: {},
+  processArgs: string[],
+  endpoint: string
+) {
   await writePrometheusConfigToDisk(configFilename, configJson);
   await spawnPrometheusSubprocess(binaryFilename, processArgs, endpoint);
 }
 
 async function writePrometheusConfigToDisk(configFilename: string, configJson: {}) {
   await mkdirp.sync(path.dirname(configFilename));
-  const ymlTxt = jsyaml.safeDump(configJson, {'sortKeys': true});
+  const ymlTxt = jsyaml.safeDump(configJson, {sortKeys: true});
   // Write the file asynchronously to prevent blocking the node thread.
   await new Promise<void>((resolve, reject) => {
     fs.writeFile(configFilename, ymlTxt, 'utf-8', (err) => {
@@ -92,9 +176,12 @@ async function writePrometheusConfigToDisk(configFilename: string, configJson: {
 }
 
 async function spawnPrometheusSubprocess(
-    binaryFilename: string, processArgs: string[],
-    prometheusEndpoint: string): Promise<child_process.ChildProcess> {
-  logging.info(`Starting Prometheus with args [${processArgs}]`);
+  binaryFilename: string,
+  processArgs: string[],
+  prometheusEndpoint: string
+): Promise<child_process.ChildProcess> {
+  logging.info('======== Starting Prometheus ========');
+  logging.info(`${binaryFilename} ${processArgs.map((a) => `"${a}"`).join(' ')}`);
   const runProcess = child_process.spawn(binaryFilename, processArgs);
   runProcess.on('error', (error) => {
     logging.error(`Error spawning Prometheus: ${error}`);
@@ -119,12 +206,14 @@ async function waitForPrometheusReady(prometheusEndpoint: string) {
 }
 
 function isHttpEndpointHealthy(endpoint: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    http.get(endpoint, (response) => {
-          resolve(response.statusCode >= 200 && response.statusCode < 300);
-        }).on('error', (e) => {
-      // Prometheus is not ready yet.
-      resolve(false);
-    });
+  return new Promise((resolve, _) => {
+    http
+      .get(endpoint, (response) => {
+        resolve(response.statusCode >= 200 && response.statusCode < 300);
+      })
+      .on('error', () => {
+        // Prometheus is not ready yet.
+        resolve(false);
+      });
   });
 }

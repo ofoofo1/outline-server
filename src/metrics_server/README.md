@@ -12,7 +12,7 @@ The metrics server deploys two services: `dev`, used for development testing and
 
 The metrics server supports two URL paths:
 
-* `POST /connections`: report server data usage broken down by user.
+- `POST /connections`: report server data usage broken down by user.
 
   ```
   {
@@ -20,34 +20,36 @@ The metrics server supports two URL paths:
     startUtcMs: number,
     endUtcMs: number,
     userReports: [{
-        userId: string,
         countries: string[],
+        asn: number,
         bytesTransferred: number,
+        tunnelTimeSec: number,
     }]
   }
   ```
-* `POST /features`: report feature usage.
 
-    ```
-    {
-        serverId: string,
-        serverVersion: string,
-        timestampUtcMs: number,
-        dataLimit: {
-            enabled: boolean
-            perKeyLimitCount: number
-        }
-    }
-    ```
+- `POST /features`: report feature usage.
+
+  ```
+  {
+      serverId: string,
+      serverVersion: string,
+      timestampUtcMs: number,
+      dataLimit: {
+          enabled: boolean
+          perKeyLimitCount: number
+      }
+  }
+  ```
 
 ## Requirements
 
-* [Google Cloud SDK](https://cloud.google.com/sdk/)
+- [Google Cloud SDK](https://cloud.google.com/sdk/)
 
 ## Build
 
 ```sh
-npm run action metrics_server/build
+task metrics_server:build
 ```
 
 ## Run
@@ -55,31 +57,32 @@ npm run action metrics_server/build
 Run a local development metrics server:
 
 ```sh
-npm run action metrics_server/start
+task metrics_server:start
 ```
 
 ## Deploy
 
-* Authenticate with `gcloud`:
+- Authenticate with `gcloud`:
   ```sh
   gcloud auth login
   ```
-* To deploy to dev:
+- To deploy to dev:
   ```sh
-  npm run action metrics_server/deploy_dev
+  task metrics_server:deploy:dev
   ```
-* To deploy to prod:
+- To deploy to prod:
   ```sh
-  npm run action metrics_server/deploy_prod
+  task metrics_server:deploy:prod
   ```
+  Once deployed, you will need to manually migrate all traffic to the new version via the Google Cloud console.
 
 ## Test
 
-* Unit test
+- Unit test
   ```sh
-  npm run action metrics_server/test
+  task metrics_server:test
   ```
-* Integration test
+- Integration test
   ```sh
-  npm run action metrics_server/test_integration
+  task metrics_server:integration_test
   ```
